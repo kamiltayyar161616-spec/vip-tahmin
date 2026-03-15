@@ -1,218 +1,107 @@
 """
-Sofascore API — Fikstür + Takım İstatistik Çekici
+BetOracle — Flask Backend
+Railway deploy için hazır
 """
-import requests
+import os
 import datetime
-from typing import Optional
+from flask import Flask, render_template, jsonify, request
+from flask_caching import Cache
 
-BASE = "https://api.sofascore.com/api/v1"
+import football_api as fapi
+import value_hunting as vh
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Android 14; Mobile; rv:120.0) Gecko/120.0 Firefox/120.0",
-    "Referer":    "https://www.sofascore.com/",
-    "Accept":     "application/json, text/plain, */*",
-    "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
-    "Origin":     "https://www.sofascore.com",
+app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "betoraclev2-secret")
+
+cache_config = {
+    "CACHE_TYPE": "SimpleCache",
+    "CACHE_DEFAULT_TIMEOUT": 1800,
 }
+cache = Cache(app, config=cache_config)
 
-TIMEOUT = 12
+def today_str() -> str:
+    return datetime.datetime.utcnow().strftime("%Y-%m-%d")
 
-
-def _get(url: str, params: dict = None) -> Optional[dict]:
+def analyze_match(match: dict) -> dict:
+    cache_key = f"analysis_{match['home_id']}_{match['away_id']}"
+    cached = cache.get(cache_key)
+    if cached:
+        match["analysis"] = cached
+        return match
     try:
-        r = requests.get(url, headers=HEADERS, params=params, timeout=TIMEOUT)
-        if r.status_code == 200:
-            return r.json()
-    except Exception as e:
-        print(f"[Sofascore] GET hata: {url} → {e}")
-    return None
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# FİKSTÜR
-# ────────────────────────────────────────────────────────────────────────────
-
-def get_fixtures_by_date(date_str: str) -> list[dict]:
-    """
-    Verilen tarihteki tüm futbol maçlarını döndürür.
-    date_str: 'YYYY-MM-DD'
-    """
-    url  = f"{BASE}/sport/football/scheduled-events/{date_str}"
-    data = _get(url)
-    if not data or "events" not in data:
-        return []
-
-    matches = []
-    for ev in data["events"]:
-        try:
-            home = ev["homeTeam"]["name"]
-            away = ev["awayTeam"]["name"]
-            home_id = ev["homeTeam"]["id"]
-            away_id = ev["awayTeam"]["id"]
-            match_id = ev["id"]
-
-            tournament = ev.get("tournament", {})
-            league_name = tournament.get("name", "")
-            category = tournament.get("category", {}).get("name", "")
-            league_full = f"{category} — {league_name}" if category else league_name
-
-            slug = ev.get("tournament", {}).get("category", {}).get("flag", "")
-            status_code = ev.get("status", {}).get("code", 0)
-
-            # Başlamamış maçlar (code 0 = not started)
-            timestamp = ev.get("startTimestamp", 0)
-            dt = datetime.datetime.utcfromtimestamp(timestamp)
-            match_time = dt.strftime("%H:%M")
-
-            matches.append({
-                "match_id":   match_id,
-                "home_team":  home,
-                "away_team":  away,
-                "home_id":    home_id,
-                "away_id":    away_id,
-                "league":     league_full,
-                "time":       match_time,
-                "status":     status_code,
-                "timestamp":  timestamp,
-            })
-        except (KeyError, TypeError):
-            continue
-
-    # Saate göre sırala
-    matches.sort(key=lambda x: x["timestamp"])
-    return matches
-
-
-def get_live_fixtures() -> list[dict]:
-    """Canlı maçları döndürür."""
-    url  = f"{BASE}/sport/football/events/live"
-    data = _get(url)
-    if not data or "events" not in data:
-        return []
-
-    matches = []
-    for ev in data["events"]:
-        try:
-            matches.append({
-                "match_id":  ev["id"],
-                "home_team": ev["homeTeam"]["name"],
-                "away_team": ev["awayTeam"]["name"],
-                "home_id":   ev["homeTeam"]["id"],
-                "away_id":   ev["awayTeam"]["id"],
-                "league":    ev.get("tournament", {}).get("name", ""),
-                "time":      ev.get("status", {}).get("description", "Canlı"),
-                "status":    ev.get("status", {}).get("code", 6),
-                "timestamp": ev.get("startTimestamp", 0),
-            })
-        except (KeyError, TypeError):
-            continue
-    return matches
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# TAKIM İSTATİSTİKLERİ
-# ────────────────────────────────────────────────────────────────────────────
-
-def _parse_event_stats(event: dict, team_id: int) -> Optional[dict]:
-    """Tek bir maç eventinden gol bilgisi çıkarır."""
-    try:
-        home_id    = event["homeTeam"]["id"]
-        home_score = event.get("homeScore", {}).get("current", 0) or 0
-        away_score = event.get("awayScore", {}).get("current", 0) or 0
-
-        if team_id == home_id:
-            return {"goals_scored": home_score, "goals_conceded": away_score,
-                    "is_home": True,
-                    "result": "W" if home_score > away_score else ("D" if home_score == away_score else "L")}
+        data = fapi.get_match_data(match["home_id"], match["away_id"])
+        if not data["home_general"] and not data["away_general"]:
+            match["analysis"] = vh.fallback_result()
         else:
-            return {"goals_scored": away_score, "goals_conceded": home_score,
-                    "is_home": False,
-                    "result": "W" if away_score > home_score else ("D" if home_score == away_score else "L")}
-    except (KeyError, TypeError):
-        return None
+            result = vh.run_value_hunting(
+                data["home_general"], data["home_venue"],
+                data["away_general"], data["away_venue"],
+            )
+            cache.set(cache_key, result)
+            match["analysis"] = result
+    except Exception as e:
+        print(f"[analyze_match] hata: {e}")
+        match["analysis"] = vh.fallback_result()
+    return match
 
+@app.route("/")
+def index():
+    return render_template("index.html")
 
-def get_team_last_matches(team_id: int, limit: int = 6) -> list[dict]:
-    """Son N genel maç."""
-    url  = f"{BASE}/team/{team_id}/events/last/0"
-    data = _get(url)
-    if not data or "events" not in data:
-        return []
+@app.route("/api/fixtures")
+def api_fixtures():
+    date = request.args.get("date", today_str())
+    cache_key = f"fixtures_{date}"
+    cached = cache.get(cache_key)
+    if cached:
+        return jsonify({"success": True, "matches": cached, "date": date})
+    matches = fapi.get_fixtures_by_date(date)
+    cache.set(cache_key, matches, timeout=600)
+    return jsonify({"success": True, "matches": matches, "date": date})
 
-    events = data["events"][-limit:]
-    results = []
-    for ev in events:
-        parsed = _parse_event_stats(ev, team_id)
-        if parsed:
-            results.append(parsed)
-    return results
+@app.route("/api/analyze/<int:home_id>/<int:away_id>")
+def api_analyze(home_id: int, away_id: int):
+    cache_key = f"analysis_{home_id}_{away_id}"
+    cached = cache.get(cache_key)
+    if cached:
+        return jsonify({"success": True, "analysis": cached})
+    try:
+        data = fapi.get_match_data(home_id, away_id)
+        result = vh.run_value_hunting(
+            data["home_general"], data["home_venue"],
+            data["away_general"], data["away_venue"],
+        )
+        cache.set(cache_key, result)
+        return jsonify({"success": True, "analysis": result})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e),
+                        "analysis": vh.fallback_result()})
 
+@app.route("/api/analyze-all")
+def api_analyze_all():
+    date = request.args.get("date", today_str())
+    cache_key = f"analyzed_all_{date}"
+    cached = cache.get(cache_key)
+    if cached:
+        return jsonify({"success": True, "matches": cached, "date": date, "cached": True})
+    matches = fapi.get_fixtures_by_date(date)
+    analyzed = [analyze_match(m) for m in matches]
+    cache.set(cache_key, analyzed, timeout=1800)
+    return jsonify({"success": True, "matches": analyzed, "date": date, "cached": False})
 
-def get_team_home_matches(team_id: int, limit: int = 6) -> list[dict]:
-    """Son N iç saha maçı."""
-    all_matches = _get_all_last(team_id, pages=3)
-    home = [m for m in all_matches if m.get("is_home")]
-    return home[-limit:]
+@app.route("/api/clear-cache")
+def api_clear_cache():
+    cache.clear()
+    return jsonify({"success": True, "message": "Cache temizlendi"})
 
+@app.errorhandler(404)
+def not_found(e):
+    return jsonify({"error": "Sayfa bulunamadı"}), 404
 
-def get_team_away_matches(team_id: int, limit: int = 6) -> list[dict]:
-    """Son N deplasman maçı."""
-    all_matches = _get_all_last(team_id, pages=3)
-    away = [m for m in all_matches if not m.get("is_home")]
-    return away[-limit:]
+@app.errorhandler(500)
+def server_error(e):
+    return jsonify({"error": "Sunucu hatası"}), 500
 
-
-def _get_all_last(team_id: int, pages: int = 3) -> list[dict]:
-    """Birden fazla sayfa geçmişi toplar."""
-    all_events = []
-    for page in range(pages):
-        url  = f"{BASE}/team/{team_id}/events/last/{page}"
-        data = _get(url)
-        if not data or "events" not in data:
-            break
-        for ev in data["events"]:
-            parsed = _parse_event_stats(ev, team_id)
-            if parsed:
-                all_events.append(parsed)
-        if not data.get("hasNextPage", False) and page > 0:
-            break
-    return all_events
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# TAKIM ARAMA
-# ────────────────────────────────────────────────────────────────────────────
-
-def search_team(name: str) -> Optional[int]:
-    """Takım adından ID bul."""
-    url  = f"{BASE}/search/multi/{requests.utils.quote(name)}"
-    data = _get(url)
-    if not data:
-        return None
-    for item in data.get("results", []):
-        if item.get("type") == "team":
-            return item["entity"]["id"]
-    return None
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# TOPLU VERİ ÇEKME (bir maç için 4 veri seti)
-# ────────────────────────────────────────────────────────────────────────────
-
-def get_match_data(home_id: int, away_id: int) -> dict:
-    """
-    Ev sahibi ve deplasman için 4 veri setini çeker:
-    - home_general, home_venue (iç saha)
-    - away_general, away_venue (deplasman)
-    """
-    home_general = get_team_last_matches(home_id, 6)
-    home_venue   = get_team_home_matches(home_id, 6)
-    away_general = get_team_last_matches(away_id, 6)
-    away_venue   = get_team_away_matches(away_id, 6)
-
-    return {
-        "home_general": home_general,
-        "home_venue":   home_venue,
-        "away_general": away_general,
-        "away_venue":   away_venue,
-    }
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
