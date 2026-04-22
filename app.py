@@ -46,6 +46,12 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/ping")
+def ping():
+    """Keep-alive endpoint - UptimeRobot veya benzeri servisler icin."""
+    return jsonify({"status": "ok"}), 200
+
+
 @app.route("/api/fixtures")
 def api_fixtures():
     date      = request.args.get("date", today_str())
