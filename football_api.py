@@ -7,7 +7,7 @@ import datetime
 import os
 
 BASE    = "https://apiv2.allsportsapi.com/football/"
-API_KEY = os.environ.get("ALLSPORTS_KEY", "6ca626700e85e10ff510b77813507e1d")
+API_KEY = os.environ.get("ALLSPORTS_KEY", "552d02afa498d630efe42a89500cb1964dcba1b23fd9a929dc526fc3b1523747")
 HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
 TIMEOUT   = 15
 TZ_OFFSET = 1
