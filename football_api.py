@@ -432,10 +432,11 @@ def get_match_data(home_id, away_id, league_key=None):
     home_venue = [m for m in home_all if m["is_home"]]
     away_venue = [m for m in away_all if not m["is_home"]]
 
-    # 6 mac yoksa genel listeden tamamla
-    if len(home_venue) < 6:
+    # Sadece gercek ic/dis saha maclarini kullan, DOLDURMA yapma
+    # (doldurma genel ile ayni seti olusturup rating'leri esitliyordu)
+    if len(home_venue) == 0:
         home_venue = home_all[:6]
-    if len(away_venue) < 6:
+    if len(away_venue) == 0:
         away_venue = away_all[:6]
 
     return {
