@@ -166,7 +166,7 @@ def scoreline_clusters(matrix: list) -> dict:
 # ADIM 8 — Pazar Olasiliklari
 # IY 0.5 duzeltmesi: lambda'yi daha gercekci sekilde olcekle
 # ════════════════════════════════════════════════════════════════════════════
-def compute_market_probs(matrix: list, lh: float, la: float) -> dict:
+def compute_market_probs(matrix: list, lh: float, la: float, lh_iy=None, la_iy=None) -> dict:
     p_home = p_draw = p_away = 0.0
     for i in range(MAX_GOALS + 1):
         for j in range(MAX_GOALS + 1):
@@ -176,8 +176,10 @@ def compute_market_probs(matrix: list, lh: float, la: float) -> dict:
 
     # IY lambda: toplam beklenen golun IY_RATIO kadarini IY'de bekliyoruz
     # Ek duzeltme: her iki takim icin de daha muhafazakar tahmin
-    lh_iy = lh * IY_RATIO
-    la_iy = la * IY_RATIO
+    if lh_iy is None:
+        lh_iy = lh * IY_RATIO
+    if la_iy is None:
+        la_iy = la * IY_RATIO
 
     # IY 0.5 alt = her iki takim da 0 gol atar
     p_iy05_under = poisson_pmf(0, lh_iy) * poisson_pmf(0, la_iy)
@@ -204,6 +206,33 @@ def prob_to_odds(prob: float, payout: float = PAYOUT) -> float:
 
 def apply_margin(probs: dict) -> dict:
     return {key: prob_to_odds(probs[key]) for key in ["1", "X", "2"]}
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# ADIM 8b — Ilk yari lambdasi: takimlarin gercek IY gol gecmisi (NowGoal) + model (IY_RATIO)
+# Az veride modele, cok veride gecmise yaslanir (IY_SHRINK mac = %50 agirlik)
+# ════════════════════════════════════════════════════════════════════════════
+IY_SHRINK = 6
+
+
+def _iy_mean(matches: list, key: str):
+    vals = [m[key] for m in matches if m.get(key) is not None]
+    return (statistics.mean(vals), len(vals)) if vals else (None, 0)
+
+
+def compute_iy_lambdas(lh, la, home_matches, away_matches):
+    h_s, n1 = _iy_mean(home_matches, "iy_scored")
+    h_c, n2 = _iy_mean(home_matches, "iy_conceded")
+    a_s, n3 = _iy_mean(away_matches, "iy_scored")
+    a_c, n4 = _iy_mean(away_matches, "iy_conceded")
+    base_h, base_a = lh * IY_RATIO, la * IY_RATIO
+    n = min(n1, n2, n3, n4)
+    if n == 0:
+        return base_h, base_a, 0
+    w = n / (n + IY_SHRINK)
+    emp_h = (h_s + a_c) / 2
+    emp_a = (a_s + h_c) / 2
+    return round(w * emp_h + (1 - w) * base_h, 4), round(w * emp_a + (1 - w) * base_a, 4), n
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -241,8 +270,9 @@ def run_value_hunting(
     # 7 — Scoreline clusters
     clusters = scoreline_clusters(matrix)
 
-    # 8 — Pazar olasiliklari
-    probs = compute_market_probs(matrix, lh, la)
+    # 8 — Pazar olasiliklari (IY: takimlarin gercek ilk yari gecmisiyle)
+    lh_iy, la_iy, iy_n = compute_iy_lambdas(lh, la, home_general_matches, away_general_matches)
+    probs = compute_market_probs(matrix, lh, la, lh_iy, la_iy)
 
     # 9 — Marjli oranlar
     odds = apply_margin(probs)
@@ -273,6 +303,9 @@ def run_value_hunting(
         "iy05_under_pct":  round(probs["iy05_under"] * 100, 1),
         "lambda_home":     lh,
         "lambda_away":     la,
+        "iy_lambda_home":  lh_iy,
+        "iy_lambda_away":  la_iy,
+        "iy_data_n":       iy_n,
         "volatility":      volatility,
         "clusters":        clusters,
         "gs_factor":       gs_factor,
